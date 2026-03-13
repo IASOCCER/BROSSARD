@@ -48,9 +48,23 @@ def init_db():
     """)
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS saisons (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nom TEXT NOT NULL,
+        categorie TEXT,
+        responsable TEXT,
+        date_debut TEXT,
+        date_fin TEXT,
+        statut TEXT,
+        notes TEXT
+    )
+    """)
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS projets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         nom TEXT NOT NULL,
+        saison_id INTEGER,
         categorie TEXT,
         responsable TEXT,
         statut TEXT,
@@ -61,7 +75,8 @@ def init_db():
         budget_reel REAL DEFAULT 0,
         revenu_prevu REAL DEFAULT 0,
         revenu_reel REAL DEFAULT 0,
-        description TEXT
+        description TEXT,
+        FOREIGN KEY(saison_id) REFERENCES saisons(id)
     )
     """)
 
@@ -100,12 +115,14 @@ def init_db():
     )
     """)
 
-    # Migration douce si ancienne base
+    # Migrations douces
     colonnes_projets = [row[1] for row in cur.execute("PRAGMA table_info(projets)").fetchall()]
     if "revenu_prevu" not in colonnes_projets:
         cur.execute("ALTER TABLE projets ADD COLUMN revenu_prevu REAL DEFAULT 0")
     if "revenu_reel" not in colonnes_projets:
         cur.execute("ALTER TABLE projets ADD COLUMN revenu_reel REAL DEFAULT 0")
+    if "saison_id" not in colonnes_projets:
+        cur.execute("ALTER TABLE projets ADD COLUMN saison_id INTEGER")
 
     colonnes_budget = [row[1] for row in cur.execute("PRAGMA table_info(budget_lignes)").fetchall()]
     if "type_ligne" not in colonnes_budget:
@@ -133,7 +150,7 @@ def run_query(query, params=(), fetch=False):
     return None
 
 # =========================================================
-# DONNÉES
+# DONNÉES / CALCULS
 # =========================================================
 def recalculer_finances_projets():
     conn = get_connection()
@@ -168,7 +185,16 @@ def charger_donnees():
     conn = get_connection()
 
     equipe_df = pd.read_sql_query("SELECT * FROM equipe ORDER BY id DESC", conn)
-    projets_df = pd.read_sql_query("SELECT * FROM projets ORDER BY id DESC", conn)
+    saisons_df = pd.read_sql_query("SELECT * FROM saisons ORDER BY id DESC", conn)
+
+    projets_df = pd.read_sql_query("""
+        SELECT
+            projets.*,
+            saisons.nom AS saison_nom
+        FROM projets
+        LEFT JOIN saisons ON projets.saison_id = saisons.id
+        ORDER BY projets.id DESC
+    """, conn)
 
     taches_df = pd.read_sql_query("""
         SELECT
@@ -210,7 +236,7 @@ def charger_donnees():
     """, conn)
 
     conn.close()
-    return equipe_df, projets_df, taches_df, budget_lignes_df
+    return equipe_df, saisons_df, projets_df, taches_df, budget_lignes_df
 
 # =========================================================
 # EXPORT / BACKUP
@@ -220,42 +246,42 @@ def generate_backup_files():
 
     conn = get_connection()
     equipe_df = pd.read_sql_query("SELECT * FROM equipe", conn)
+    saisons_df = pd.read_sql_query("SELECT * FROM saisons", conn)
     projets_df = pd.read_sql_query("SELECT * FROM projets", conn)
     taches_df = pd.read_sql_query("SELECT * FROM taches", conn)
     budget_df = pd.read_sql_query("SELECT * FROM budget_lignes", conn)
     conn.close()
 
-    # JSON
     backup_json = {
         "created_at": timestamp,
         "equipe": equipe_df.to_dict(orient="records"),
+        "saisons": saisons_df.to_dict(orient="records"),
         "projets": projets_df.to_dict(orient="records"),
         "taches": taches_df.to_dict(orient="records"),
         "budget_lignes": budget_df.to_dict(orient="records")
     }
     json_bytes = json.dumps(backup_json, indent=4, ensure_ascii=False).encode("utf-8")
 
-    # CSV
     csv_bundle = {
         f"equipe_{timestamp}.csv": equipe_df.to_csv(index=False).encode("utf-8"),
+        f"saisons_{timestamp}.csv": saisons_df.to_csv(index=False).encode("utf-8"),
         f"projets_{timestamp}.csv": projets_df.to_csv(index=False).encode("utf-8"),
         f"taches_{timestamp}.csv": taches_df.to_csv(index=False).encode("utf-8"),
         f"budget_lignes_{timestamp}.csv": budget_df.to_csv(index=False).encode("utf-8"),
     }
 
-    # Excel
     excel_io = BytesIO()
     with pd.ExcelWriter(excel_io, engine="openpyxl") as writer:
         equipe_df.to_excel(writer, index=False, sheet_name="Equipe")
+        saisons_df.to_excel(writer, index=False, sheet_name="Saisons")
         projets_df.to_excel(writer, index=False, sheet_name="Projets")
         taches_df.to_excel(writer, index=False, sheet_name="Taches")
         budget_df.to_excel(writer, index=False, sheet_name="Budget")
     excel_bytes = excel_io.getvalue()
 
-    # SQLite
     db_bytes = DB_PATH.read_bytes() if DB_PATH.exists() else b""
 
-    # Sauvegarde serveur interne aussi
+    # Sauvegarde serveur
     json_file = BACKUP_DIR / f"backup_{timestamp}.json"
     with open(json_file, "wb") as f:
         f.write(json_bytes)
@@ -296,19 +322,19 @@ def latest_backup():
 init_db()
 recalculer_finances_projets()
 
-CATEGORIES = [
+CATEGORIES_SAISON = [
+    "CDC", "Compétitif", "PLSJQ", "LDP", "Senior",
+    "Féminin", "Camp", "Événement"
+]
+
+CATEGORIES_PROJET = [
     "Technique", "Compétitif", "CDC", "Camps", "Formation",
     "Administration", "Événements", "Voyages", "Finance", "Communication"
 ]
 
-STATUTS_PROJET = [
-    "Idée", "En préparation", "En attente", "En cours", "Terminé", "Annulé"
-]
-
-STATUTS_TACHE = [
-    "À faire", "En cours", "Bloqué", "Terminé"
-]
-
+STATUTS_SAISON = ["Préparation", "Actif", "Terminé"]
+STATUTS_PROJET = ["Idée", "En préparation", "En attente", "En cours", "Terminé", "Annulé"]
+STATUTS_TACHE = ["À faire", "En cours", "Bloqué", "Terminé"]
 PRIORITES = ["Haute", "Moyenne", "Basse"]
 
 CATEGORIES_DEPENSE = [
@@ -330,17 +356,19 @@ menu = st.sidebar.radio(
     "Navigation",
     [
         "Tableau de bord",
+        "Saison",
         "Équipe",
         "Projets",
         "Tâches",
         "Calendrier",
         "Chronologie",
         "Budget",
+        "Rapports",
         "Sauvegardes"
     ]
 )
 
-equipe_df, projets_df, taches_df, budget_lignes_df = charger_donnees()
+equipe_df, saisons_df, projets_df, taches_df, budget_lignes_df = charger_donnees()
 
 # =========================================================
 # TABLEAU DE BORD
@@ -348,6 +376,7 @@ equipe_df, projets_df, taches_df, budget_lignes_df = charger_donnees()
 if menu == "Tableau de bord":
     st.title("Tableau de bord")
 
+    total_saisons = len(saisons_df)
     total_projets = len(projets_df)
     total_taches = len(taches_df)
     total_equipe = len(equipe_df)
@@ -368,10 +397,10 @@ if menu == "Tableau de bord":
         taches_en_retard = len(work[(work["date_limite_dt"] < today) & (work["statut"] != "Terminé")])
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Projets", total_projets)
-    c2.metric("Tâches", total_taches)
-    c3.metric("Équipe", total_equipe)
-    c4.metric("Tâches en retard", taches_en_retard)
+    c1.metric("Saisons", total_saisons)
+    c2.metric("Projets", total_projets)
+    c3.metric("Tâches", total_taches)
+    c4.metric("Équipe", total_equipe)
 
     c5, c6, c7 = st.columns(3)
     c5.metric("Dépenses prévues", f"{dep_prevu:,.2f} $")
@@ -383,6 +412,8 @@ if menu == "Tableau de bord":
     c9.metric("Revenus réels", f"{rev_reel:,.2f} $")
     c10.metric("Résultat réel", f"{resultat_reel:,.2f} $")
 
+    st.metric("Tâches en retard", taches_en_retard)
+
     st.markdown("### Résumé des projets")
     if not projets_df.empty:
         show_df = projets_df.copy()
@@ -390,7 +421,7 @@ if menu == "Tableau de bord":
         show_df["résultat_réel"] = show_df["revenu_reel"] - show_df["budget_reel"]
         st.dataframe(
             show_df[[
-                "nom", "categorie", "responsable", "statut",
+                "nom", "saison_nom", "categorie", "responsable", "statut",
                 "budget_prevu", "revenu_prevu", "résultat_prévu",
                 "budget_reel", "revenu_reel", "résultat_réel"
             ]],
@@ -399,6 +430,55 @@ if menu == "Tableau de bord":
         )
     else:
         st.info("Aucun projet enregistré.")
+
+# =========================================================
+# SAISON
+# =========================================================
+elif menu == "Saison":
+    st.title("Gestion des saisons")
+
+    noms_equipe = equipe_df["nom"].tolist() if not equipe_df.empty else []
+
+    with st.form("form_saison"):
+        st.subheader("Créer une saison / programme")
+
+        col1, col2, col3 = st.columns(3)
+        nom = col1.text_input("Nom de la saison")
+        categorie = col2.selectbox("Catégorie", CATEGORIES_SAISON)
+        responsable = col3.selectbox("Responsable", noms_equipe if noms_equipe else [""])
+
+        col4, col5 = st.columns(2)
+        date_debut = col4.date_input("Date début")
+        date_fin = col5.date_input("Date fin")
+
+        statut = st.selectbox("Statut", STATUTS_SAISON)
+        notes = st.text_area("Notes")
+
+        submitted = st.form_submit_button("Créer saison")
+
+        if submitted and nom:
+            run_query("""
+                INSERT INTO saisons
+                (nom, categorie, responsable, date_debut, date_fin, statut, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                nom,
+                categorie,
+                responsable,
+                str(date_debut),
+                str(date_fin),
+                statut,
+                notes
+            ))
+            auto_backup()
+            st.success("Saison créée avec succès.")
+            st.rerun()
+
+    st.subheader("Liste des saisons")
+    if not saisons_df.empty:
+        st.dataframe(saisons_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Aucune saison enregistrée.")
 
 # =========================================================
 # ÉQUIPE
@@ -437,31 +517,39 @@ elif menu == "Projets":
     st.title("Projets")
 
     noms_equipe = equipe_df["nom"].tolist() if not equipe_df.empty else []
+    saisons_options = {row["nom"]: row["id"] for _, row in saisons_df.iterrows()} if not saisons_df.empty else {}
 
     with st.form("form_projet"):
         st.subheader("Créer un projet")
         c1, c2, c3 = st.columns(3)
 
         nom = c1.text_input("Nom du projet")
-        categorie = c2.selectbox("Catégorie", CATEGORIES)
-        responsable = c3.selectbox("Responsable", noms_equipe if noms_equipe else [""])
+        saison_nom = c2.selectbox("Saison", list(saisons_options.keys()) if saisons_options else [""])
+        categorie = c3.selectbox("Catégorie", CATEGORIES_PROJET)
 
-        statut = c1.selectbox("Statut", STATUTS_PROJET)
-        priorite = c2.selectbox("Priorité", PRIORITES)
-        date_debut = c3.date_input("Date de début", value=date.today())
+        c4, c5, c6 = st.columns(3)
+        responsable = c4.selectbox("Responsable", noms_equipe if noms_equipe else [""])
+        statut = c5.selectbox("Statut", STATUTS_PROJET)
+        priorite = c6.selectbox("Priorité", PRIORITES)
 
-        date_fin = c1.date_input("Date de fin", value=date.today() + timedelta(days=30))
+        c7, c8 = st.columns(2)
+        date_debut = c7.date_input("Date de début", value=date.today())
+        date_fin = c8.date_input("Date de fin", value=date.today() + timedelta(days=30))
+
         description = st.text_area("Description")
         submitted = st.form_submit_button("Créer le projet")
 
         if submitted and nom:
+            saison_id = saisons_options[saison_nom] if saison_nom in saisons_options else None
             run_query("""
                 INSERT INTO projets
-                (nom, categorie, responsable, statut, priorite, date_debut, date_fin, budget_prevu, budget_reel, revenu_prevu, revenu_reel, description)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (nom, saison_id, categorie, responsable, statut, priorite, date_debut, date_fin,
+                 budget_prevu, budget_reel, revenu_prevu, revenu_reel, description)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                nom, categorie, responsable, statut, priorite,
-                str(date_debut), str(date_fin), 0, 0, 0, 0, description
+                nom, saison_id, categorie, responsable, statut, priorite,
+                str(date_debut), str(date_fin),
+                0, 0, 0, 0, description
             ))
             auto_backup()
             st.success("Projet créé avec succès.")
@@ -493,13 +581,15 @@ elif menu == "Tâches":
         titre = c2.text_input("Titre de la tâche")
         responsable = c3.selectbox("Responsable", noms_equipe if noms_equipe else [""])
 
-        statut = c1.selectbox("Statut", STATUTS_TACHE)
-        priorite = c2.selectbox("Priorité", PRIORITES)
-        date_debut = c3.date_input("Date de début", value=date.today(), key="date_debut_tache")
+        c4, c5, c6 = st.columns(3)
+        statut = c4.selectbox("Statut", STATUTS_TACHE)
+        priorite = c5.selectbox("Priorité", PRIORITES)
+        date_debut = c6.date_input("Date de début", value=date.today(), key="date_debut_tache")
 
-        date_limite = c1.date_input("Date limite", value=date.today() + timedelta(days=7), key="date_limite_tache")
-        cout_prevu = c2.number_input("Coût prévu", min_value=0.0, step=10.0)
-        cout_reel = c3.number_input("Coût réel", min_value=0.0, step=10.0)
+        c7, c8, c9 = st.columns(3)
+        date_limite = c7.date_input("Date limite", value=date.today() + timedelta(days=7), key="date_limite_tache")
+        cout_prevu = c8.number_input("Coût prévu", min_value=0.0, step=10.0)
+        cout_reel = c9.number_input("Coût réel", min_value=0.0, step=10.0)
 
         notes = st.text_area("Notes")
         notification_interne = st.checkbox("Afficher comme notification interne")
@@ -588,10 +678,10 @@ elif menu == "Chronologie":
                     x_end="date_fin",
                     y="nom",
                     color="statut",
-                    hover_data=["categorie", "responsable", "priorite", "budget_prevu", "revenu_prevu"]
+                    hover_data=["saison_nom", "categorie", "responsable", "priorite", "budget_prevu", "revenu_prevu"]
                 )
                 fig.update_yaxes(autorange="reversed")
-                fig.update_layout(height=600)
+                fig.update_layout(height=650)
                 st.plotly_chart(fig, use_container_width=True)
     else:
         if taches_df.empty:
@@ -723,7 +813,7 @@ elif menu == "Budget":
             global_df["résultat_réel"] = global_df["revenu_reel"] - global_df["budget_reel"]
             st.dataframe(
                 global_df[[
-                    "nom", "categorie", "responsable",
+                    "nom", "saison_nom", "categorie", "responsable",
                     "budget_prevu", "revenu_prevu", "résultat_prévu",
                     "budget_reel", "revenu_reel", "résultat_réel", "statut"
                 ]],
@@ -732,17 +822,52 @@ elif menu == "Budget":
             )
 
 # =========================================================
+# RAPPORTS
+# =========================================================
+elif menu == "Rapports":
+    st.title("Rapports")
+
+    if projets_df.empty:
+        st.info("Aucun projet enregistré.")
+    else:
+        rapport_df = projets_df.copy()
+        rapport_df["résultat_prévu"] = rapport_df["revenu_prevu"] - rapport_df["budget_prevu"]
+        rapport_df["résultat_réel"] = rapport_df["revenu_reel"] - rapport_df["budget_reel"]
+
+        filtre_saison = st.selectbox(
+            "Filtrer par saison",
+            ["Toutes"] + sorted([x for x in rapport_df["saison_nom"].dropna().unique().tolist()])
+        )
+
+        filtre_statut = st.selectbox(
+            "Filtrer par statut",
+            ["Tous"] + STATUTS_PROJET
+        )
+
+        if filtre_saison != "Toutes":
+            rapport_df = rapport_df[rapport_df["saison_nom"] == filtre_saison]
+        if filtre_statut != "Tous":
+            rapport_df = rapport_df[rapport_df["statut"] == filtre_statut]
+
+        st.dataframe(
+            rapport_df[[
+                "nom", "saison_nom", "categorie", "responsable", "statut",
+                "budget_prevu", "revenu_prevu", "résultat_prévu",
+                "budget_reel", "revenu_reel", "résultat_réel"
+            ]],
+            use_container_width=True,
+            hide_index=True
+        )
+
+# =========================================================
 # SAUVEGARDES
 # =========================================================
 elif menu == "Sauvegardes":
     st.title("Sauvegardes et exportation")
 
-    c1, c2 = st.columns(2)
-
-    with c1:
-        if st.button("Créer une sauvegarde maintenant"):
-            st.session_state["latest_backup"] = generate_backup_files()
-            st.success("Sauvegarde créée avec succès.")
+    if st.button("Créer une sauvegarde maintenant"):
+        st.session_state["latest_backup"] = generate_backup_files()
+        st.success("Sauvegarde créée avec succès.")
 
     backup = latest_backup()
 
