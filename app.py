@@ -55,6 +55,8 @@ def init_db():
         date_fin TEXT,
         budget_prevu REAL DEFAULT 0,
         budget_reel REAL DEFAULT 0,
+        revenu_prevu REAL DEFAULT 0,
+        revenu_reel REAL DEFAULT 0,
         description TEXT
     )
     """)
@@ -81,17 +83,35 @@ def init_db():
     CREATE TABLE IF NOT EXISTS budget_lignes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         projet_id INTEGER,
+        type_ligne TEXT,
         categorie TEXT,
         description TEXT,
         quantite REAL DEFAULT 1,
-        cout_unitaire_prevu REAL DEFAULT 0,
-        cout_unitaire_reel REAL DEFAULT 0,
+        montant_unitaire_prevu REAL DEFAULT 0,
+        montant_unitaire_reel REAL DEFAULT 0,
         total_prevu REAL DEFAULT 0,
         total_reel REAL DEFAULT 0,
         notes TEXT,
         FOREIGN KEY(projet_id) REFERENCES projets(id)
     )
     """)
+
+    # Compatibilité si la base existe déjà
+    colonnes_projets = [row[1] for row in cur.execute("PRAGMA table_info(projets)").fetchall()]
+    if "revenu_prevu" not in colonnes_projets:
+        cur.execute("ALTER TABLE projets ADD COLUMN revenu_prevu REAL DEFAULT 0")
+    if "revenu_reel" not in colonnes_projets:
+        cur.execute("ALTER TABLE projets ADD COLUMN revenu_reel REAL DEFAULT 0")
+
+    colonnes_budget = [row[1] for row in cur.execute("PRAGMA table_info(budget_lignes)").fetchall()]
+    if "type_ligne" not in colonnes_budget:
+        cur.execute("ALTER TABLE budget_lignes ADD COLUMN type_ligne TEXT DEFAULT 'Dépense'")
+    if "montant_unitaire_prevu" not in colonnes_budget and "cout_unitaire_prevu" in colonnes_budget:
+        cur.execute("ALTER TABLE budget_lignes ADD COLUMN montant_unitaire_prevu REAL DEFAULT 0")
+        cur.execute("UPDATE budget_lignes SET montant_unitaire_prevu = cout_unitaire_prevu")
+    if "montant_unitaire_reel" not in colonnes_budget and "cout_unitaire_reel" in colonnes_budget:
+        cur.execute("ALTER TABLE budget_lignes ADD COLUMN montant_unitaire_reel REAL DEFAULT 0")
+        cur.execute("UPDATE budget_lignes SET montant_unitaire_reel = cout_unitaire_reel")
 
     conn.commit()
     conn.close()
@@ -160,23 +180,30 @@ def export_data():
 
     return equipe_file.name, projets_file.name, taches_file.name, budget_file.name
 
-def recalculer_budgets_projets():
+def recalculer_finances_projets():
     conn = get_connection()
     projets = pd.read_sql_query("SELECT id FROM projets", conn)
 
     for _, row in projets.iterrows():
         projet_id = row["id"]
         lignes = pd.read_sql_query(
-            "SELECT total_prevu, total_reel FROM budget_lignes WHERE projet_id = ?",
+            "SELECT type_ligne, total_prevu, total_reel FROM budget_lignes WHERE projet_id = ?",
             conn,
             params=(projet_id,)
         )
-        total_prevu = lignes["total_prevu"].sum() if not lignes.empty else 0
-        total_reel = lignes["total_reel"].sum() if not lignes.empty else 0
+
+        dep_prevu = lignes[lignes["type_ligne"] == "Dépense"]["total_prevu"].sum() if not lignes.empty else 0
+        dep_reel = lignes[lignes["type_ligne"] == "Dépense"]["total_reel"].sum() if not lignes.empty else 0
+        rev_prevu = lignes[lignes["type_ligne"] == "Revenu"]["total_prevu"].sum() if not lignes.empty else 0
+        rev_reel = lignes[lignes["type_ligne"] == "Revenu"]["total_reel"].sum() if not lignes.empty else 0
 
         conn.execute(
-            "UPDATE projets SET budget_prevu = ?, budget_reel = ? WHERE id = ?",
-            (float(total_prevu), float(total_reel), int(projet_id))
+            """
+            UPDATE projets
+            SET budget_prevu = ?, budget_reel = ?, revenu_prevu = ?, revenu_reel = ?
+            WHERE id = ?
+            """,
+            (float(dep_prevu), float(dep_reel), float(rev_prevu), float(rev_reel), int(projet_id))
         )
 
     conn.commit()
@@ -186,6 +213,7 @@ def charger_donnees():
     conn = get_connection()
     equipe_df = pd.read_sql_query("SELECT * FROM equipe ORDER BY id DESC", conn)
     projets_df = pd.read_sql_query("SELECT * FROM projets ORDER BY id DESC", conn)
+
     taches_df = pd.read_sql_query("""
         SELECT
             taches.id,
@@ -211,11 +239,12 @@ def charger_donnees():
             budget_lignes.id,
             budget_lignes.projet_id,
             projets.nom AS projet,
+            budget_lignes.type_ligne,
             budget_lignes.categorie,
             budget_lignes.description,
             budget_lignes.quantite,
-            budget_lignes.cout_unitaire_prevu,
-            budget_lignes.cout_unitaire_reel,
+            budget_lignes.montant_unitaire_prevu,
+            budget_lignes.montant_unitaire_reel,
             budget_lignes.total_prevu,
             budget_lignes.total_reel,
             budget_lignes.notes
@@ -231,7 +260,7 @@ def charger_donnees():
 # INITIALISATION
 # =========================================================
 init_db()
-recalculer_budgets_projets()
+recalculer_finances_projets()
 
 CATEGORIES = [
     "Technique", "Compétitif", "CDC", "Camps", "Formation",
@@ -248,24 +277,17 @@ STATUTS_TACHE = [
 
 PRIORITES = ["Haute", "Moyenne", "Basse"]
 
-CATEGORIES_BUDGET = [
-    "Terrain",
-    "Entraîneur",
-    "Staff",
-    "Matériel",
-    "Transport",
-    "Hôtel",
-    "Repas",
-    "Communication",
-    "Marketing",
-    "Arbitrage",
-    "Administration",
-    "Divers"
+CATEGORIES_DEPENSE = [
+    "Terrain", "Entraîneur", "Staff", "Matériel", "Transport",
+    "Hôtel", "Repas", "Communication", "Marketing", "Arbitrage",
+    "Administration", "Divers"
 ]
 
-# =========================================================
-# SIDEBAR
-# =========================================================
+CATEGORIES_REVENU = [
+    "Inscriptions", "Subvention", "Sponsoring", "Partenariat",
+    "Vente équipement", "Billetterie", "Autre revenu"
+]
+
 st.sidebar.title("⚽ Brossard Manager")
 menu = st.sidebar.radio(
     "Navigation",
@@ -293,29 +315,40 @@ if menu == "Tableau de bord":
     total_taches = len(taches_df)
     total_equipe = len(equipe_df)
 
-    budget_prevu = projets_df["budget_prevu"].sum() if not projets_df.empty else 0
-    budget_reel = projets_df["budget_reel"].sum() if not projets_df.empty else 0
-    solde = budget_prevu - budget_reel
+    dep_prevu = projets_df["budget_prevu"].sum() if not projets_df.empty else 0
+    dep_reel = projets_df["budget_reel"].sum() if not projets_df.empty else 0
+    rev_prevu = projets_df["revenu_prevu"].sum() if not projets_df.empty else 0
+    rev_reel = projets_df["revenu_reel"].sum() if not projets_df.empty else 0
+
+    resultat_prevu = rev_prevu - dep_prevu
+    resultat_reel = rev_reel - dep_reel
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Projets actifs", total_projets)
     c2.metric("Tâches", total_taches)
     c3.metric("Équipe", total_equipe)
-    c4.metric("Budget total prévu", f"{budget_prevu:,.2f} $")
+    c4.metric("Lignes financières", len(budget_lignes_df))
 
     c5, c6, c7 = st.columns(3)
-    c5.metric("Budget réel total", f"{budget_reel:,.2f} $")
-    c6.metric("Écart global", f"{solde:,.2f} $")
-    c7.metric("Lignes de budget", len(budget_lignes_df))
+    c5.metric("Dépenses prévues", f"{dep_prevu:,.2f} $")
+    c6.metric("Revenus prévus", f"{rev_prevu:,.2f} $")
+    c7.metric("Résultat prévu", f"{resultat_prevu:,.2f} $")
+
+    c8, c9, c10 = st.columns(3)
+    c8.metric("Dépenses réelles", f"{dep_reel:,.2f} $")
+    c9.metric("Revenus réels", f"{rev_reel:,.2f} $")
+    c10.metric("Résultat réel", f"{resultat_reel:,.2f} $")
 
     st.markdown("### Résumé des projets")
     if not projets_df.empty:
         show_df = projets_df.copy()
-        show_df["écart"] = show_df["budget_prevu"] - show_df["budget_reel"]
+        show_df["résultat_prévu"] = show_df["revenu_prevu"] - show_df["budget_prevu"]
+        show_df["résultat_réel"] = show_df["revenu_reel"] - show_df["budget_reel"]
         st.dataframe(
             show_df[[
                 "nom", "categorie", "responsable", "statut",
-                "budget_prevu", "budget_reel", "écart"
+                "budget_prevu", "revenu_prevu", "résultat_prévu",
+                "budget_reel", "revenu_reel", "résultat_réel"
             ]],
             use_container_width=True,
             hide_index=True
@@ -379,11 +412,11 @@ elif menu == "Projets":
         if submitted and nom:
             run_query("""
                 INSERT INTO projets
-                (nom, categorie, responsable, statut, priorite, date_debut, date_fin, budget_prevu, budget_reel, description)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (nom, categorie, responsable, statut, priorite, date_debut, date_fin, budget_prevu, budget_reel, revenu_prevu, revenu_reel, description)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 nom, categorie, responsable, statut, priorite,
-                str(date_debut), str(date_fin), 0, 0, description
+                str(date_debut), str(date_fin), 0, 0, 0, 0, description
             ))
             st.success("Projet créé avec succès.")
             st.rerun()
@@ -391,7 +424,8 @@ elif menu == "Projets":
     st.subheader("Liste des projets")
     if not projets_df.empty:
         show_df = projets_df.copy()
-        show_df["écart"] = show_df["budget_prevu"] - show_df["budget_reel"]
+        show_df["résultat_prévu"] = show_df["revenu_prevu"] - show_df["budget_prevu"]
+        show_df["résultat_réel"] = show_df["revenu_reel"] - show_df["budget_reel"]
         st.dataframe(show_df, use_container_width=True, hide_index=True)
     else:
         st.info("Aucun projet enregistré.")
@@ -491,7 +525,7 @@ elif menu == "Chronologie":
                     x_end="date_fin",
                     y="nom",
                     color="statut",
-                    hover_data=["categorie", "responsable", "priorite", "budget_prevu", "budget_reel"]
+                    hover_data=["categorie", "responsable", "priorite", "budget_prevu", "revenu_prevu"]
                 )
                 fig.update_yaxes(autorange="reversed")
                 fig.update_layout(height=600)
@@ -533,37 +567,42 @@ elif menu == "Budget":
     if not projets_options:
         st.info("Créez d'abord un projet.")
     else:
-        st.subheader("Ajouter une ligne de coût")
+        st.subheader("Ajouter une ligne financière")
         with st.form("form_budget_ligne"):
             c1, c2, c3 = st.columns(3)
             projet_nom = c1.selectbox("Projet", list(projets_options.keys()))
-            categorie = c2.selectbox("Catégorie de coût", CATEGORIES_BUDGET)
-            description = c3.text_input("Description")
+            type_ligne = c2.selectbox("Type", ["Dépense", "Revenu"])
+
+            categories_dyn = CATEGORIES_DEPENSE if type_ligne == "Dépense" else CATEGORIES_REVENU
+            categorie = c3.selectbox("Catégorie", categories_dyn)
 
             c4, c5, c6 = st.columns(3)
-            quantite = c4.number_input("Quantité", min_value=1.0, step=1.0, value=1.0)
-            cout_unitaire_prevu = c5.number_input("Coût unitaire prévu", min_value=0.0, step=1.0)
-            cout_unitaire_reel = c6.number_input("Coût unitaire réel", min_value=0.0, step=1.0)
+            description = c4.text_input("Description")
+            quantite = c5.number_input("Quantité", min_value=1.0, step=1.0, value=1.0)
+            montant_unitaire_prevu = c6.number_input("Montant unitaire prévu", min_value=0.0, step=1.0)
 
-            notes = st.text_area("Notes")
+            c7, c8 = st.columns(2)
+            montant_unitaire_reel = c7.number_input("Montant unitaire réel", min_value=0.0, step=1.0)
+            notes = c8.text_input("Notes")
+
             submitted = st.form_submit_button("Ajouter la ligne")
 
             if submitted:
                 projet_id = projets_options[projet_nom]
-                total_prevu = quantite * cout_unitaire_prevu
-                total_reel = quantite * cout_unitaire_reel
+                total_prevu = quantite * montant_unitaire_prevu
+                total_reel = quantite * montant_unitaire_reel
 
                 run_query("""
                     INSERT INTO budget_lignes
-                    (projet_id, categorie, description, quantite, cout_unitaire_prevu, cout_unitaire_reel, total_prevu, total_reel, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (projet_id, type_ligne, categorie, description, quantite, montant_unitaire_prevu, montant_unitaire_reel, total_prevu, total_reel, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    projet_id, categorie, description, quantite,
-                    cout_unitaire_prevu, cout_unitaire_reel,
+                    projet_id, type_ligne, categorie, description, quantite,
+                    montant_unitaire_prevu, montant_unitaire_reel,
                     total_prevu, total_reel, notes
                 ))
-                recalculer_budgets_projets()
-                st.success("Ligne de budget ajoutée avec succès.")
+                recalculer_finances_projets()
+                st.success("Ligne financière ajoutée avec succès.")
                 st.rerun()
 
         st.markdown("### Sélection d'un projet")
@@ -572,48 +611,63 @@ elif menu == "Budget":
         budget_projet = budget_lignes_df[budget_lignes_df["projet"] == projet_filtre].copy()
 
         if budget_projet.empty:
-            st.info("Aucune ligne de budget pour ce projet.")
+            st.info("Aucune ligne financière pour ce projet.")
         else:
             budget_projet["écart"] = budget_projet["total_prevu"] - budget_projet["total_reel"]
 
             st.dataframe(
                 budget_projet[[
-                    "categorie", "description", "quantite",
-                    "cout_unitaire_prevu", "cout_unitaire_reel",
+                    "type_ligne", "categorie", "description", "quantite",
+                    "montant_unitaire_prevu", "montant_unitaire_reel",
                     "total_prevu", "total_reel", "écart", "notes"
                 ]],
                 use_container_width=True,
                 hide_index=True
             )
 
-            total_prevu = budget_projet["total_prevu"].sum()
-            total_reel = budget_projet["total_reel"].sum()
-            ecart = total_prevu - total_reel
+            dep_df = budget_projet[budget_projet["type_ligne"] == "Dépense"]
+            rev_df = budget_projet[budget_projet["type_ligne"] == "Revenu"]
+
+            dep_prevu = dep_df["total_prevu"].sum() if not dep_df.empty else 0
+            dep_reel = dep_df["total_reel"].sum() if not dep_df.empty else 0
+            rev_prevu = rev_df["total_prevu"].sum() if not rev_df.empty else 0
+            rev_reel = rev_df["total_reel"].sum() if not rev_df.empty else 0
+
+            resultat_prevu = rev_prevu - dep_prevu
+            resultat_reel = rev_reel - dep_reel
 
             c1, c2, c3 = st.columns(3)
-            c1.metric("Total prévu", f"{total_prevu:,.2f} $")
-            c2.metric("Total réel", f"{total_reel:,.2f} $")
-            c3.metric("Écart", f"{ecart:,.2f} $")
+            c1.metric("Dépenses prévues", f"{dep_prevu:,.2f} $")
+            c2.metric("Revenus prévus", f"{rev_prevu:,.2f} $")
+            c3.metric("Résultat prévu", f"{resultat_prevu:,.2f} $")
 
-            resume_cat = budget_projet.groupby("categorie", as_index=False)[["total_prevu", "total_reel"]].sum()
+            c4, c5, c6 = st.columns(3)
+            c4.metric("Dépenses réelles", f"{dep_reel:,.2f} $")
+            c5.metric("Revenus réels", f"{rev_reel:,.2f} $")
+            c6.metric("Résultat réel", f"{resultat_reel:,.2f} $")
+
+            resume_cat = budget_projet.groupby(["type_ligne", "categorie"], as_index=False)[["total_prevu", "total_reel"]].sum()
 
             fig = px.bar(
                 resume_cat,
                 x="categorie",
                 y=["total_prevu", "total_reel"],
+                color="type_ligne",
                 barmode="group",
-                title=f"Budget par catégorie - {projet_filtre}"
+                title=f"Finances par catégorie - {projet_filtre}"
             )
             st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("### Résumé global de tous les projets")
         if not projets_df.empty:
             global_df = projets_df.copy()
-            global_df["écart"] = global_df["budget_prevu"] - global_df["budget_reel"]
+            global_df["résultat_prévu"] = global_df["revenu_prevu"] - global_df["budget_prevu"]
+            global_df["résultat_réel"] = global_df["revenu_reel"] - global_df["budget_reel"]
             st.dataframe(
                 global_df[[
                     "nom", "categorie", "responsable",
-                    "budget_prevu", "budget_reel", "écart", "statut"
+                    "budget_prevu", "revenu_prevu", "résultat_prévu",
+                    "budget_reel", "revenu_reel", "résultat_réel", "statut"
                 ]],
                 use_container_width=True,
                 hide_index=True
