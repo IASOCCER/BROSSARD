@@ -7,7 +7,11 @@ from datetime import datetime, date, timedelta
 import json
 import os
 import shutil
+from io import BytesIO
 
+# =========================================================
+# CONFIGURATION
+# =========================================================
 st.set_page_config(
     page_title="Brossard Manager",
     page_icon="⚽",
@@ -83,7 +87,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS budget_lignes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         projet_id INTEGER,
-        type_ligne TEXT,
+        type_ligne TEXT DEFAULT 'Dépense',
         categorie TEXT,
         description TEXT,
         quantite REAL DEFAULT 1,
@@ -96,7 +100,7 @@ def init_db():
     )
     """)
 
-    # Compatibilité si la base existe déjà
+    # Migration douce si ancienne base
     colonnes_projets = [row[1] for row in cur.execute("PRAGMA table_info(projets)").fetchall()]
     if "revenu_prevu" not in colonnes_projets:
         cur.execute("ALTER TABLE projets ADD COLUMN revenu_prevu REAL DEFAULT 0")
@@ -129,57 +133,8 @@ def run_query(query, params=(), fetch=False):
     return None
 
 # =========================================================
-# OUTILS
+# DONNÉES
 # =========================================================
-def create_backup():
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-    db_backup_file = BACKUP_DIR / f"database_backup_{timestamp}.db"
-    if DB_PATH.exists():
-        shutil.copy(DB_PATH, db_backup_file)
-
-    conn = get_connection()
-    equipe_df = pd.read_sql_query("SELECT * FROM equipe", conn)
-    projets_df = pd.read_sql_query("SELECT * FROM projets", conn)
-    taches_df = pd.read_sql_query("SELECT * FROM taches", conn)
-    budget_df = pd.read_sql_query("SELECT * FROM budget_lignes", conn)
-    conn.close()
-
-    backup_json = {
-        "equipe": equipe_df.to_dict(orient="records"),
-        "projets": projets_df.to_dict(orient="records"),
-        "taches": taches_df.to_dict(orient="records"),
-        "budget_lignes": budget_df.to_dict(orient="records"),
-        "created_at": timestamp
-    }
-
-    json_backup_file = BACKUP_DIR / f"backup_{timestamp}.json"
-    with open(json_backup_file, "w", encoding="utf-8") as f:
-        json.dump(backup_json, f, indent=4, ensure_ascii=False)
-
-    return db_backup_file.name, json_backup_file.name
-
-def export_data():
-    conn = get_connection()
-    equipe_df = pd.read_sql_query("SELECT * FROM equipe", conn)
-    projets_df = pd.read_sql_query("SELECT * FROM projets", conn)
-    taches_df = pd.read_sql_query("SELECT * FROM taches", conn)
-    budget_df = pd.read_sql_query("SELECT * FROM budget_lignes", conn)
-    conn.close()
-
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    equipe_file = EXPORT_DIR / f"equipe_{timestamp}.csv"
-    projets_file = EXPORT_DIR / f"projets_{timestamp}.csv"
-    taches_file = EXPORT_DIR / f"taches_{timestamp}.csv"
-    budget_file = EXPORT_DIR / f"budget_lignes_{timestamp}.csv"
-
-    equipe_df.to_csv(equipe_file, index=False)
-    projets_df.to_csv(projets_file, index=False)
-    taches_df.to_csv(taches_file, index=False)
-    budget_df.to_csv(budget_file, index=False)
-
-    return equipe_file.name, projets_file.name, taches_file.name, budget_file.name
-
 def recalculer_finances_projets():
     conn = get_connection()
     projets = pd.read_sql_query("SELECT id FROM projets", conn)
@@ -211,6 +166,7 @@ def recalculer_finances_projets():
 
 def charger_donnees():
     conn = get_connection()
+
     equipe_df = pd.read_sql_query("SELECT * FROM equipe ORDER BY id DESC", conn)
     projets_df = pd.read_sql_query("SELECT * FROM projets ORDER BY id DESC", conn)
 
@@ -257,6 +213,84 @@ def charger_donnees():
     return equipe_df, projets_df, taches_df, budget_lignes_df
 
 # =========================================================
+# EXPORT / BACKUP
+# =========================================================
+def generate_backup_files():
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    conn = get_connection()
+    equipe_df = pd.read_sql_query("SELECT * FROM equipe", conn)
+    projets_df = pd.read_sql_query("SELECT * FROM projets", conn)
+    taches_df = pd.read_sql_query("SELECT * FROM taches", conn)
+    budget_df = pd.read_sql_query("SELECT * FROM budget_lignes", conn)
+    conn.close()
+
+    # JSON
+    backup_json = {
+        "created_at": timestamp,
+        "equipe": equipe_df.to_dict(orient="records"),
+        "projets": projets_df.to_dict(orient="records"),
+        "taches": taches_df.to_dict(orient="records"),
+        "budget_lignes": budget_df.to_dict(orient="records")
+    }
+    json_bytes = json.dumps(backup_json, indent=4, ensure_ascii=False).encode("utf-8")
+
+    # CSV
+    csv_bundle = {
+        f"equipe_{timestamp}.csv": equipe_df.to_csv(index=False).encode("utf-8"),
+        f"projets_{timestamp}.csv": projets_df.to_csv(index=False).encode("utf-8"),
+        f"taches_{timestamp}.csv": taches_df.to_csv(index=False).encode("utf-8"),
+        f"budget_lignes_{timestamp}.csv": budget_df.to_csv(index=False).encode("utf-8"),
+    }
+
+    # Excel
+    excel_io = BytesIO()
+    with pd.ExcelWriter(excel_io, engine="openpyxl") as writer:
+        equipe_df.to_excel(writer, index=False, sheet_name="Equipe")
+        projets_df.to_excel(writer, index=False, sheet_name="Projets")
+        taches_df.to_excel(writer, index=False, sheet_name="Taches")
+        budget_df.to_excel(writer, index=False, sheet_name="Budget")
+    excel_bytes = excel_io.getvalue()
+
+    # SQLite
+    db_bytes = DB_PATH.read_bytes() if DB_PATH.exists() else b""
+
+    # Sauvegarde serveur interne aussi
+    json_file = BACKUP_DIR / f"backup_{timestamp}.json"
+    with open(json_file, "wb") as f:
+        f.write(json_bytes)
+
+    db_file = BACKUP_DIR / f"database_backup_{timestamp}.db"
+    if DB_PATH.exists():
+        shutil.copy(DB_PATH, db_file)
+
+    for filename, content in csv_bundle.items():
+        with open(EXPORT_DIR / filename, "wb") as f:
+            f.write(content)
+
+    with open(EXPORT_DIR / f"export_complet_{timestamp}.xlsx", "wb") as f:
+        f.write(excel_bytes)
+
+    return {
+        "timestamp": timestamp,
+        "json_bytes": json_bytes,
+        "csv_bundle": csv_bundle,
+        "excel_bytes": excel_bytes,
+        "db_bytes": db_bytes,
+        "json_filename": f"backup_{timestamp}.json",
+        "excel_filename": f"export_complet_{timestamp}.xlsx",
+        "db_filename": f"database_backup_{timestamp}.db"
+    }
+
+def auto_backup():
+    st.session_state["latest_backup"] = generate_backup_files()
+
+def latest_backup():
+    if "latest_backup" not in st.session_state:
+        st.session_state["latest_backup"] = generate_backup_files()
+    return st.session_state["latest_backup"]
+
+# =========================================================
 # INITIALISATION
 # =========================================================
 init_db()
@@ -288,6 +322,9 @@ CATEGORIES_REVENU = [
     "Vente équipement", "Billetterie", "Autre revenu"
 ]
 
+# =========================================================
+# SIDEBAR
+# =========================================================
 st.sidebar.title("⚽ Brossard Manager")
 menu = st.sidebar.radio(
     "Navigation",
@@ -323,11 +360,18 @@ if menu == "Tableau de bord":
     resultat_prevu = rev_prevu - dep_prevu
     resultat_reel = rev_reel - dep_reel
 
+    taches_en_retard = 0
+    if not taches_df.empty:
+        work = taches_df.copy()
+        work["date_limite_dt"] = pd.to_datetime(work["date_limite"], errors="coerce")
+        today = pd.Timestamp(date.today())
+        taches_en_retard = len(work[(work["date_limite_dt"] < today) & (work["statut"] != "Terminé")])
+
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Projets actifs", total_projets)
+    c1.metric("Projets", total_projets)
     c2.metric("Tâches", total_taches)
     c3.metric("Équipe", total_equipe)
-    c4.metric("Lignes financières", len(budget_lignes_df))
+    c4.metric("Tâches en retard", taches_en_retard)
 
     c5, c6, c7 = st.columns(3)
     c5.metric("Dépenses prévues", f"{dep_prevu:,.2f} $")
@@ -376,6 +420,7 @@ elif menu == "Équipe":
                 "INSERT INTO equipe (nom, role, email, telephone) VALUES (?, ?, ?, ?)",
                 (nom, role, email, telephone)
             )
+            auto_backup()
             st.success("Membre ajouté avec succès.")
             st.rerun()
 
@@ -418,6 +463,7 @@ elif menu == "Projets":
                 nom, categorie, responsable, statut, priorite,
                 str(date_debut), str(date_fin), 0, 0, 0, 0, description
             ))
+            auto_backup()
             st.success("Projet créé avec succès.")
             st.rerun()
 
@@ -436,10 +482,7 @@ elif menu == "Projets":
 elif menu == "Tâches":
     st.title("Tâches")
 
-    projets_options = {}
-    if not projets_df.empty:
-        projets_options = {row["nom"]: row["id"] for _, row in projets_df.iterrows()}
-
+    projets_options = {row["nom"]: row["id"] for _, row in projets_df.iterrows()} if not projets_df.empty else {}
     noms_equipe = equipe_df["nom"].tolist() if not equipe_df.empty else []
 
     with st.form("form_tache"):
@@ -472,6 +515,7 @@ elif menu == "Tâches":
                 projet_id, titre, responsable, statut, priorite,
                 str(date_debut), str(date_limite), cout_prevu, cout_reel, notes, 1 if notification_interne else 0
             ))
+            auto_backup()
             st.success("Tâche ajoutée avec succès.")
             st.rerun()
 
@@ -491,13 +535,32 @@ elif menu == "Calendrier":
         st.info("Aucune tâche pour le moment.")
     else:
         cal_df = taches_df.copy()
+        cal_df["date_debut_dt"] = pd.to_datetime(cal_df["date_debut"], errors="coerce")
         cal_df["date_limite_dt"] = pd.to_datetime(cal_df["date_limite"], errors="coerce")
-        cal_df = cal_df.sort_values("date_limite_dt")
 
-        agenda = cal_df[["date_limite_dt", "projet", "titre", "responsable", "statut", "priorite"]].copy()
-        agenda["date_limite"] = agenda["date_limite_dt"].dt.strftime("%Y-%m-%d")
-        agenda = agenda.drop(columns=["date_limite_dt"])
-        st.dataframe(agenda, use_container_width=True, hide_index=True)
+        vue = st.radio("Vue", ["Agenda", "Semaine"], horizontal=True)
+
+        if vue == "Agenda":
+            agenda = cal_df.sort_values("date_limite_dt")
+            agenda["date_limite_aff"] = agenda["date_limite_dt"].dt.strftime("%Y-%m-%d")
+            st.dataframe(
+                agenda[["date_limite_aff", "projet", "titre", "responsable", "statut", "priorite"]],
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            ref = st.date_input("Semaine de référence", value=date.today())
+            ref = pd.Timestamp(ref)
+            fin = ref + pd.Timedelta(days=6)
+            semaine = cal_df[(cal_df["date_limite_dt"] >= ref) & (cal_df["date_limite_dt"] <= fin)].copy()
+
+            if semaine.empty:
+                st.info("Aucune tâche prévue pour cette semaine.")
+            else:
+                semaine["jour"] = semaine["date_limite_dt"].dt.strftime("%A %d/%m")
+                semaine["détail"] = semaine["titre"] + " | " + semaine["responsable"].fillna("") + " | " + semaine["statut"].fillna("")
+                pivot = semaine.groupby("jour")["détail"].apply(lambda x: " ; ".join(x)).reset_index()
+                st.dataframe(pivot, use_container_width=True, hide_index=True)
 
 # =========================================================
 # CHRONOLOGIE
@@ -560,9 +623,7 @@ elif menu == "Chronologie":
 elif menu == "Budget":
     st.title("Budget détaillé")
 
-    projets_options = {}
-    if not projets_df.empty:
-        projets_options = {row["nom"]: row["id"] for _, row in projets_df.iterrows()}
+    projets_options = {row["nom"]: row["id"] for _, row in projets_df.iterrows()} if not projets_df.empty else {}
 
     if not projets_options:
         st.info("Créez d'abord un projet.")
@@ -572,9 +633,7 @@ elif menu == "Budget":
             c1, c2, c3 = st.columns(3)
             projet_nom = c1.selectbox("Projet", list(projets_options.keys()))
             type_ligne = c2.selectbox("Type", ["Dépense", "Revenu"])
-
-            categories_dyn = CATEGORIES_DEPENSE if type_ligne == "Dépense" else CATEGORIES_REVENU
-            categorie = c3.selectbox("Catégorie", categories_dyn)
+            categorie = c3.selectbox("Catégorie", CATEGORIES_DEPENSE if type_ligne == "Dépense" else CATEGORIES_REVENU)
 
             c4, c5, c6 = st.columns(3)
             description = c4.text_input("Description")
@@ -602,12 +661,12 @@ elif menu == "Budget":
                     total_prevu, total_reel, notes
                 ))
                 recalculer_finances_projets()
+                auto_backup()
                 st.success("Ligne financière ajoutée avec succès.")
                 st.rerun()
 
-        st.markdown("### Sélection d'un projet")
+        st.markdown("### Projet")
         projet_filtre = st.selectbox("Voir le budget de", list(projets_options.keys()))
-
         budget_projet = budget_lignes_df[budget_lignes_df["projet"] == projet_filtre].copy()
 
         if budget_projet.empty:
@@ -647,7 +706,6 @@ elif menu == "Budget":
             c6.metric("Résultat réel", f"{resultat_reel:,.2f} $")
 
             resume_cat = budget_projet.groupby(["type_ligne", "categorie"], as_index=False)[["total_prevu", "total_reel"]].sum()
-
             fig = px.bar(
                 resume_cat,
                 x="categorie",
@@ -658,7 +716,7 @@ elif menu == "Budget":
             )
             st.plotly_chart(fig, use_container_width=True)
 
-        st.markdown("### Résumé global de tous les projets")
+        st.markdown("### Résumé global")
         if not projets_df.empty:
             global_df = projets_df.copy()
             global_df["résultat_prévu"] = global_df["revenu_prevu"] - global_df["budget_prevu"]
@@ -679,28 +737,67 @@ elif menu == "Budget":
 elif menu == "Sauvegardes":
     st.title("Sauvegardes et exportation")
 
-    st.subheader("Créer une sauvegarde complète")
-    if st.button("Créer la sauvegarde maintenant"):
-        db_file, json_file = create_backup()
-        st.success(f"Sauvegarde créée : {db_file} et {json_file}")
+    c1, c2 = st.columns(2)
 
-    st.subheader("Exporter les données")
-    if st.button("Exporter en CSV"):
-        e, p, t, b = export_data()
-        st.success(f"Fichiers exportés : {e}, {p}, {t}, {b}")
+    with c1:
+        if st.button("Créer une sauvegarde maintenant"):
+            st.session_state["latest_backup"] = generate_backup_files()
+            st.success("Sauvegarde créée avec succès.")
 
-    st.subheader("Fichiers de sauvegarde")
+    backup = latest_backup()
+
+    st.markdown("### Dernière sauvegarde")
+    st.write(f"Horodatage : {backup['timestamp']}")
+
+    st.markdown("### Télécharger les sauvegardes")
+    st.download_button(
+        "Télécharger backup JSON",
+        data=backup["json_bytes"],
+        file_name=backup["json_filename"],
+        mime="application/json"
+    )
+
+    st.download_button(
+        "Télécharger la base SQLite",
+        data=backup["db_bytes"],
+        file_name=backup["db_filename"],
+        mime="application/octet-stream"
+    )
+
+    st.download_button(
+        "Télécharger export Excel",
+        data=backup["excel_bytes"],
+        file_name=backup["excel_filename"],
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    st.markdown("### Télécharger les CSV")
+    for filename, content in backup["csv_bundle"].items():
+        st.download_button(
+            f"Télécharger {filename}",
+            data=content,
+            file_name=filename,
+            mime="text/csv",
+            key=filename
+        )
+
+    st.markdown("### Historique serveur")
     backup_files = sorted(os.listdir(BACKUP_DIR), reverse=True)
-    if backup_files:
-        for f in backup_files:
-            st.write(f)
-    else:
-        st.info("Aucune sauvegarde disponible.")
-
-    st.subheader("Fichiers exportés")
     export_files = sorted(os.listdir(EXPORT_DIR), reverse=True)
-    if export_files:
-        for f in export_files:
-            st.write(f)
-    else:
-        st.info("Aucune exportation disponible.")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.subheader("Fichiers de sauvegarde")
+        if backup_files:
+            for f in backup_files[:20]:
+                st.write(f)
+        else:
+            st.info("Aucune sauvegarde disponible.")
+
+    with col_b:
+        st.subheader("Fichiers exportés")
+        if export_files:
+            for f in export_files[:20]:
+                st.write(f)
+        else:
+            st.info("Aucune exportation disponible.")
